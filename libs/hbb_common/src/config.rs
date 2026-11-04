@@ -771,6 +771,9 @@ impl Config {
             id_valid = true;
             store = true;
         }
+        if config.id == "0" || config.id.len() < 6 {
+            id_valid = false;
+        }
         if !id_valid {
             log::warn!("ID is invalid, generating new one");
             for _ in 0..3 {
@@ -1200,11 +1203,12 @@ impl Config {
                     id = (id << 8) | (*x as u32);
                 }
                 id &= 0x1FFFFFFF;
-                log::info!("Generated id {}", id);
-                Some(id.to_string())
-            } else {
-                None
             }
+            if id < 100_000_000 {
+                id = rand::thread_rng().gen_range(100_000_000..1_000_000_000);
+            }
+            log::info!("Generated id {}", id);
+            Some(id.to_string())
         }
     }
 
@@ -1338,7 +1342,7 @@ impl Config {
 
     pub fn get_id() -> String {
         let mut id = CONFIG.read().unwrap().id.clone();
-        if id.is_empty() {
+        if id.is_empty() || id == "0" {
             if let Some(tmp) = Config::gen_id() {
                 id = tmp;
                 Config::set_id(&id);
