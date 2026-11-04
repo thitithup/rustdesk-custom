@@ -1,0 +1,318 @@
+name: Custom Build (Windows + macOS)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+
+permissions:
+  contents: write
+
+env:
+  SCITER_RUST_VERSION: "1.75"
+  RUST_VERSION: "1.75"
+  MAC_RUST_VERSION: "1.81"
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+  FLUTTER_MACOS_ARM_VERSION: "3.44.9"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VERSION: "1.5.1"
+  TAG_NAME: "custom-latest"
+  CUSTOM_RENDEZVOUS_SERVER: "123.253.61.245"
+  CUSTOM_RS_PUB_KEY: "GRCN7GZGj3XGBgJ3FpnXWB6mM2T9w0SjogneeTWKYwA="
+
+jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  build-RustDeskTempTopMostWindow:
+    uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
+    with:
+      upload-artifact: true
+      target: windows-2022
+      configuration: Release
+      platform: x64
+      target_version: Windows10
+
+  build-windows-x64:
+    name: Windows x86_64 (.exe & .msi)
+    needs: [build-RustDeskTempTopMostWindow, generate-bridge]
+    runs-on: windows-2022
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      ARCH: x86_64
+      FLUTTER_ARCH: x64
+      VCPKG_TRIPLET: x64-windows-static
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          submodules: recursive
+
+      - name: Inject Custom Server & Public Key
+        shell: bash
+        run: |
+          python3 -c '
+          p = "libs/hbb_common/src/config.rs"
+          s = open(p, "r", encoding="utf-8").read()
+          s = s.replace("pub const RENDEZVOUS_SERVERS: &[&str] = &[\"rs-ny.rustdesk.com\"];", "pub const RENDEZVOUS_SERVERS: &[&str] = &[\"${{ env.CUSTOM_RENDEZVOUS_SERVER }}\"];")
+          s = s.replace("pub const RS_PUB_KEY: &str = \"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\";", "pub const RS_PUB_KEY: &str = \"${{ env.CUSTOM_RS_PUB_KEY }}\";")
+          open(p, "w", encoding="utf-8").write(s)
+          '
+          grep -n "RENDEZVOUS_SERVERS\|RS_PUB_KEY" libs/hbb_common/src/config.rs | head -n 5
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install flutter
+        uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          architecture: x64
+
+      - name: Replace engine with rustdesk custom flutter engine
+        run: |
+          flutter doctor -v
+          flutter precache --windows
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          mv -Force windows-x64-release/* C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+
+      - name: Patch flutter
+        shell: bash
+        run: |
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff $(dirname $(dirname $(which flutter)))
+          cd $(dirname $(dirname $(which flutter)))
+          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          targets: ${{ env.TARGET }}
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          prefix-key: windows-2022
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
+        shell: bash
+        run: |
+          $VCPKG_ROOT/vcpkg install --triplet ${{ env.VCPKG_TRIPLET }} --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Build rustdesk
+        run: |
+          python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          mv ./flutter/build/windows/${{ env.FLUTTER_ARCH }}/runner/Release ./rustdesk
+
+          Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+          Expand-Archive usbmmidd_v2.zip -DestinationPath .
+          Remove-Item -Path usbmmidd_v2\Win32 -Recurse
+          Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat"
+          mv -Force .\usbmmidd_v2 ./rustdesk
+
+      - name: find Runner.res
+        continue-on-error: true
+        shell: bash
+        run: |
+          runner_res=$(find . -name "Runner.res");
+          if [ "$runner_res" != "" ]; then
+            cp $runner_res ./libs/portable/Runner.res;
+          fi
+
+      - name: Download RustDeskTempTopMostWindow artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: topmostwindow-artifacts-x64
+          path: "./rustdesk"
+
+      - name: Build self-extracted executable (.exe)
+        shell: bash
+        run: |
+          sed -i '/dpiAware/d' res/manifest.xml
+          pushd ./libs/portable
+          pip3 install -r requirements.txt
+          python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
+          popd
+          mkdir -p ./SignOutput
+          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/rustdesk-${{ env.VERSION }}-${{ env.ARCH }}.exe
+
+      - name: Upload Windows EXE Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rustdesk-windows-${{ env.ARCH }}-exe
+          path: ./SignOutput/rustdesk-${{ env.VERSION }}-${{ env.ARCH }}.exe
+
+  build-macos:
+    name: macOS (${{ matrix.job.arch }})
+    needs: [generate-bridge]
+    runs-on: ${{ matrix.job.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - {
+              target: aarch64-apple-darwin,
+              os: macos-14,
+              extra-build-args: "--screencapturekit",
+              arch: aarch64,
+              vcpkg-triplet: arm64-osx,
+            }
+          - {
+              target: x86_64-apple-darwin,
+              os: macos-15-intel,
+              extra-build-args: "",
+              arch: x86_64,
+              vcpkg-triplet: x64-osx,
+            }
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          submodules: recursive
+
+      - name: Inject Custom Server & Public Key
+        shell: bash
+        run: |
+          python3 -c '
+          p = "libs/hbb_common/src/config.rs"
+          s = open(p, "r", encoding="utf-8").read()
+          s = s.replace("pub const RENDEZVOUS_SERVERS: &[&str] = &[\"rs-ny.rustdesk.com\"];", "pub const RENDEZVOUS_SERVERS: &[&str] = &[\"${{ env.CUSTOM_RENDEZVOUS_SERVER }}\"];")
+          s = s.replace("pub const RS_PUB_KEY: &str = \"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\";", "pub const RS_PUB_KEY: &str = \"${{ env.CUSTOM_RS_PUB_KEY }}\";")
+          open(p, "w", encoding="utf-8").write(s)
+          '
+          grep -n "RENDEZVOUS_SERVERS\|RS_PUB_KEY" libs/hbb_common/src/config.rs | head -n 5
+
+      - name: Install build runtime
+        run: |
+          brew install llvm create-dmg
+          if ! command -v pkg-config &>/dev/null; then
+            brew install pkg-config
+          fi
+
+      - name: Install NASM
+        run: |
+          wget https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip
+          unzip nasm-2.16.03-macosx.zip
+          sudo cp nasm-2.16.03/nasm /usr/local/bin/nasm
+          nasm --version
+
+      - name: Install flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          channel: "stable"
+          flutter-version: ${{ matrix.job.arch == 'aarch64' && env.FLUTTER_MACOS_ARM_VERSION || env.FLUTTER_VERSION }}
+
+      - name: Keep CocoaPods for Flutter 3.44 (arm64)
+        if: ${{ matrix.job.arch == 'aarch64' }}
+        run: flutter config --no-enable-swift-package-manager
+
+      - name: Patch flutter (x86_64)
+        if: ${{ matrix.job.arch == 'x86_64' }}
+        run: |
+          cd $(dirname $(dirname $(which flutter)))
+          if [[ "3.24.5" == ${{ env.FLUTTER_VERSION }} ]]; then
+            git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
+
+      - name: Workaround for flutter issue
+        shell: bash
+        run: |
+          cd "$(dirname "$(which flutter)")"
+          sed -i -e 's/_setFramesEnabledState(false);/\/\/_setFramesEnabledState(false);/g' ../packages/flutter/lib/src/scheduler/binding.dart
+
+      - name: Patch RustDesk sources for Flutter 3.44 (arm64)
+        if: ${{ matrix.job.arch == 'aarch64' }}
+        shell: bash
+        run: |
+          brew install gnu-sed
+          export PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
+          bash .github/patches/apply_flutter_3.44_source_patches.sh
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.MAC_RUST_VERSION }}
+          targets: ${{ matrix.job.target }}
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          prefix-key: ${{ matrix.job.os }}
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ${{ matrix.job.arch == 'aarch64' && 'bridge-artifact-flutter-3.44' || 'bridge-artifact' }}
+          path: ./
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        run: |
+          $VCPKG_ROOT/vcpkg install --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Build rustdesk
+        run: |
+          if [ "${{ matrix.job.target }}" = "aarch64-apple-darwin" ]; then
+            MIN_MACOS_VERSION="12.3"
+            sed -i -e "s/MACOSX_DEPLOYMENT_TARGET\=[0-9]*.[0-9]*/MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS_VERSION}/" build.py
+            sed -i -e "s/platform :osx, '.*'/platform :osx, '${MIN_MACOS_VERSION}'/" flutter/macos/Podfile
+            sed -i -e "s/osx_minimum_system_version = \"[0-9]*.[0-9]*\"/osx_minimum_system_version = \"${MIN_MACOS_VERSION}\"/" Cargo.toml
+            sed -i -e "s/MACOSX_DEPLOYMENT_TARGET = [0-9]*.[0-9]*;/MACOSX_DEPLOYMENT_TARGET = ${MIN_MACOS_VERSION};/" flutter/macos/Runner.xcodeproj/project.pbxproj
+            echo "MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS_VERSION}" >> "$GITHUB_ENV"
+          fi
+          ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.job.extra-build-args }}
+
+      - name: Create DMG
+        run: |
+          CREATE_DMG="$(command -v create-dmg)"
+          CREATE_DMG="$(readlink -f "$CREATE_DMG")"
+          sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
+          create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app
+
+      - name: Upload macOS DMG Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rustdesk-macos-${{ matrix.job.arch }}-dmg
+          path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg
