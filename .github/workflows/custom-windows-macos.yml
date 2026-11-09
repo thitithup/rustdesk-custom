@@ -304,15 +304,50 @@ jobs:
           fi
           ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.job.extra-build-args }}
 
-      - name: Create DMG
+      - name: Create DMG and PKG
         run: |
+          codesign --force --sign - ./flutter/build/macos/Build/Products/Release/RustDesk.app/Contents/MacOS/service
+          codesign --force --sign - ./flutter/build/macos/Build/Products/Release/RustDesk.app/Contents/Frameworks/liblibrustdesk.dylib
+          codesign --force --deep --sign - --entitlements ./flutter/macos/Runner/Release.entitlements ./flutter/build/macos/Build/Products/Release/RustDesk.app
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "$CREATE_DMG")"
           sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
           create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app
 
-      - name: Upload macOS DMG Artifact
+          mkdir -p pkg_work/root/Applications pkg_work/scripts
+          ditto ./flutter/build/macos/Build/Products/Release/RustDesk.app pkg_work/root/Applications/RustDesk.app
+          printf '%s\n' '#!/bin/bash' '/usr/bin/killall RustDesk 2>/dev/null || true' 'exit 0' > pkg_work/scripts/preinstall
+          printf '%s\n' \
+            '#!/bin/bash' \
+            '/usr/bin/xattr -cr /Applications/RustDesk.app 2>/dev/null || true' \
+            '/bin/chmod -R a+rX /Applications/RustDesk.app 2>/dev/null || true' \
+            'CURRENT_USER=$(/usr/bin/stat -f "%Su" /dev/console 2>/dev/null || true)' \
+            'if [ -n "$CURRENT_USER" ] && [ "$CURRENT_USER" != "root" ]; then' \
+            '    /usr/bin/su -l "$CURRENT_USER" -c "/usr/bin/open -a /Applications/RustDesk.app" 2>/dev/null || true' \
+            'fi' \
+            'exit 0' > pkg_work/scripts/postinstall
+          chmod +x pkg_work/scripts/preinstall pkg_work/scripts/postinstall
+          pkgbuild --analyze --root pkg_work/root pkg_work/component.plist
+          plutil -replace 0.BundleIsRelocatable -bool NO pkg_work/component.plist
+          plutil -replace 0.BundleIsVersionChecked -bool NO pkg_work/component.plist
+          pkgbuild --root pkg_work/root --component-plist pkg_work/component.plist --scripts pkg_work/scripts --identifier com.carriez.RustDesk --version ${{ env.VERSION }} --install-location / pkg_work/component.pkg
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="utf-8"?>' \
+            '<installer-gui-script minSpecVersion="2">' \
+            '    <title>INECO Remote (RustDesk) - ${{ matrix.job.arch }}</title>' \
+            '    <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>' \
+            '    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>' \
+            '    <choices-outline><line choice="default"><line choice="com.carriez.RustDesk"/></line></choices-outline>' \
+            '    <choice id="default"/>' \
+            '    <choice id="com.carriez.RustDesk" visible="false"><pkg-ref id="com.carriez.RustDesk"/></choice>' \
+            '    <pkg-ref id="com.carriez.RustDesk" version="${{ env.VERSION }}" onConclusion="none">component.pkg</pkg-ref>' \
+            '</installer-gui-script>' > pkg_work/distribution.xml
+          productbuild --distribution pkg_work/distribution.xml --package-path pkg_work rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.pkg
+
+      - name: Upload macOS DMG & PKG Artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: rustdesk-macos-${{ matrix.job.arch }}-dmg
-          path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg
+          path: |
+            rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg
+            rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.pkg
