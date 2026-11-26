@@ -1044,7 +1044,7 @@ pub fn is_modifier(evt: &KeyEvent) -> bool {
 }
 
 pub fn check_software_update() {
-    if is_custom_client() {
+    if is_custom_client() || is_custom_rendezvous_build() {
         return;
     }
     let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);
@@ -1163,6 +1163,10 @@ fn process_software_update_check_response(bytes: Bytes) -> ResultType<()> {
 // Because the url is always `https://api.rustdesk.com/version/latest`.
 #[tokio::main(flavor = "current_thread")]
 pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
+    if is_custom_rendezvous_build() {
+        clear_software_update_url();
+        return Ok(());
+    }
     let (request, url) =
         hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
     let proxy_conf = Config::get_socks();
@@ -2694,6 +2698,12 @@ pub fn get_builtin_option(key: &str) -> String {
 #[inline]
 pub fn is_custom_client() -> bool {
     get_app_name() != "RustDesk"
+}
+
+#[inline]
+pub fn is_custom_rendezvous_build() -> bool {
+    config::RENDEZVOUS_SERVERS != ["rs-ny.rustdesk.com"]
+        || config::RS_PUB_KEY != "OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw="
 }
 
 pub fn verify_login(_raw: &str, _id: &str) -> bool {
