@@ -5,6 +5,9 @@ name: Build flutter-rust-bridge
 on:
   workflow_call:
 
+permissions:
+  contents: read
+
 env:
   CARGO_EXPAND_VERSION: "1.0.95"
   FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
@@ -38,6 +41,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install prerequisites
         run: |

@@ -8,7 +8,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   SCITER_RUST_VERSION: "1.75"
@@ -58,15 +58,20 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Inject Custom Server & Public Key
         shell: bash
         run: |
           python3 -c '
+          import os, re
           p = "libs/hbb_common/src/config.rs"
           s = open(p, "r", encoding="utf-8").read()
-          s = s.replace("pub const RENDEZVOUS_SERVERS: &[&str] = &[\"rs-ny.rustdesk.com\"];", "pub const RENDEZVOUS_SERVERS: &[&str] = &[\"${{ env.CUSTOM_RENDEZVOUS_SERVER }}\"];")
-          s = s.replace("pub const RS_PUB_KEY: &str = \"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\";", "pub const RS_PUB_KEY: &str = \"${{ env.CUSTOM_RS_PUB_KEY }}\";")
+          srv = os.environ["CUSTOM_RENDEZVOUS_SERVER"]
+          key = os.environ["CUSTOM_RS_PUB_KEY"]
+          s, n1 = re.subn(r"pub const RENDEZVOUS_SERVERS: &\[&str\] = &\[[^\]]*\];", f"pub const RENDEZVOUS_SERVERS: &[&str] = &[\"{srv}\"];", s, count=1)
+          s, n2 = re.subn(r"pub const RS_PUB_KEY: &str = \"[^\"]*\";", f"pub const RS_PUB_KEY: &str = \"{key}\";", s, count=1)
+          assert n1 == 1 and n2 == 1, f"Injection failed: n1={n1}, n2={n2}"
           open(p, "w", encoding="utf-8").write(s)
           '
           grep -n "RENDEZVOUS_SERVERS\|RS_PUB_KEY" libs/hbb_common/src/config.rs | head -n 5
@@ -135,6 +140,9 @@ jobs:
           mv ./flutter/build/windows/${{ env.FLUTTER_ARCH }}/runner/Release ./rustdesk
 
           Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+          $actualHash = (Get-FileHash -Path usbmmidd_v2.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expectedHash = "629b51e9944762bae73948171c65d09a79595cf4c771a82ebc003fbba5b24f51"
+          if ($actualHash -ne $expectedHash) { throw "usbmmidd_v2.zip SHA256 mismatch: $actualHash" }
           Expand-Archive usbmmidd_v2.zip -DestinationPath .
           Remove-Item -Path usbmmidd_v2\Win32 -Recurse
           Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat"
@@ -160,7 +168,7 @@ jobs:
         run: |
           sed -i '/dpiAware/d' res/manifest.xml
           pushd ./libs/portable
-          pip3 install -r requirements.txt
+          pip3 install --require-hashes -r requirements.txt
           python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
           popd
           mkdir -p ./SignOutput
@@ -206,15 +214,20 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Inject Custom Server & Public Key
         shell: bash
         run: |
           python3 -c '
+          import os, re
           p = "libs/hbb_common/src/config.rs"
           s = open(p, "r", encoding="utf-8").read()
-          s = s.replace("pub const RENDEZVOUS_SERVERS: &[&str] = &[\"rs-ny.rustdesk.com\"];", "pub const RENDEZVOUS_SERVERS: &[&str] = &[\"${{ env.CUSTOM_RENDEZVOUS_SERVER }}\"];")
-          s = s.replace("pub const RS_PUB_KEY: &str = \"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\";", "pub const RS_PUB_KEY: &str = \"${{ env.CUSTOM_RS_PUB_KEY }}\";")
+          srv = os.environ["CUSTOM_RENDEZVOUS_SERVER"]
+          key = os.environ["CUSTOM_RS_PUB_KEY"]
+          s, n1 = re.subn(r"pub const RENDEZVOUS_SERVERS: &\[&str\] = &\[[^\]]*\];", f"pub const RENDEZVOUS_SERVERS: &[&str] = &[\"{srv}\"];", s, count=1)
+          s, n2 = re.subn(r"pub const RS_PUB_KEY: &str = \"[^\"]*\";", f"pub const RS_PUB_KEY: &str = \"{key}\";", s, count=1)
+          assert n1 == 1 and n2 == 1, f"Injection failed: n1={n1}, n2={n2}"
           open(p, "w", encoding="utf-8").write(s)
           '
           grep -n "RENDEZVOUS_SERVERS\|RS_PUB_KEY" libs/hbb_common/src/config.rs | head -n 5
@@ -229,6 +242,7 @@ jobs:
       - name: Install NASM
         run: |
           wget https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip
+          echo "0d29bcd8a5fc617333f4549c7c1f93d1866a4a0915c40359e0a8585bb1a5aa75  nasm-2.16.03-macosx.zip" | shasum -a 256 -c -
           unzip nasm-2.16.03-macosx.zip
           sudo cp nasm-2.16.03/nasm /usr/local/bin/nasm
           nasm --version
@@ -320,10 +334,13 @@ jobs:
           printf '%s\n' \
             '#!/bin/bash' \
             '/usr/bin/xattr -cr /Applications/RustDesk.app 2>/dev/null || true' \
-            '/bin/chmod -R a+rX /Applications/RustDesk.app 2>/dev/null || true' \
+            '/bin/chmod -R a+rX,go-w /Applications/RustDesk.app 2>/dev/null || true' \
             'CURRENT_USER=$(/usr/bin/stat -f "%Su" /dev/console 2>/dev/null || true)' \
             'if [ -n "$CURRENT_USER" ] && [ "$CURRENT_USER" != "root" ]; then' \
-            '    /usr/bin/su -l "$CURRENT_USER" -c "/usr/bin/open -a /Applications/RustDesk.app" 2>/dev/null || true' \
+            '    CURRENT_UID=$(/usr/bin/id -u "$CURRENT_USER" 2>/dev/null || true)' \
+            '    if [ -n "$CURRENT_UID" ]; then' \
+            '        /bin/launchctl asuser "$CURRENT_UID" /usr/bin/open -a /Applications/RustDesk.app 2>/dev/null || true' \
+            '    fi' \
             'fi' \
             'exit 0' > pkg_work/scripts/postinstall
           chmod +x pkg_work/scripts/preinstall pkg_work/scripts/postinstall
